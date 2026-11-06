@@ -86,6 +86,17 @@ def mk_site(name, api):
             "searchable": 1, "quickSearch": 1, "filterable": 1}
 
 
+def norm_key(api):
+    """去重键：域名小写 + 路径去末尾斜杠 + 忽略 query(?source/?ac 等视为同一接口)"""
+    try:
+        p = urllib.parse.urlsplit(api)
+        host = (p.netloc or "").lower()
+        path = (p.path or "").rstrip("/")
+        return host + path
+    except Exception:
+        return api
+
+
 def extract_sites(cfg, depth=0):
     """从一份 TVBox 配置里抽取 type:1 且有 http api 的普通采集站点；多仓递归一层"""
     out = []
@@ -146,9 +157,14 @@ def main():
     sites, apis = [], set()
 
     def add(name, api):
-        if api and api not in apis:
-            apis.add(api)
-            sites.append(mk_site(name, api))
+        if not api:
+            return False
+        k = norm_key(api)
+        if k in apis:
+            return False
+        apis.add(k)
+        sites.append(mk_site(name, api))
+        return True
 
     # 1) 核心源
     for k, n, a in CORE:
@@ -168,16 +184,14 @@ def main():
             print("[cfg empty] %-8s %s" % (name, url))
             continue
         for s in got:
-            if s["api"] not in apis:
-                apis.add(s["api"]); sites.append(s); harvested += 1
+            if add(s["name"], s["api"]):
+                harvested += 1
         print("[cfg alive] %-8s +%d  (az=%s)" % (name, len(got), st))
     print("harvested from zhuiju: %d" % harvested)
 
-    # 3) 粘滞：上次配置里的站点继续保留
+    # 3) 粘滞：上次配置里的站点继续保留（同 norm_key 自动合并）
     for a, s in prior.items():
-        if a not in apis:
-            apis.add(a)
-            sites.append(mk_site(s.get("name"), a))
+        add(s.get("name"), a)
 
     # 4) 去重后重排 key，封顶
     sites = sites[:MAX_SITES]
