@@ -2,14 +2,20 @@
 # -*- coding: utf-8 -*-
 """
 refresh.py —— 自动重算 TVBox 配置（点播源 + 直播频道），产物写回仓库根：mycfg.json / live.txt
-设计：CORE 核心源永远保留（防境外探测超时误杀）；EXTRA 候选源"活才追加"。
+策略：
+  - CORE 核心源永远保留；
+  - 非核心源探测分三种：alive(活)/dead(明确判死)/unknown(超时未知)；
+    保留条件 = alive，或 (unknown 且上次配置里就有) —— 绝不因单次超时误杀好源；
+  - 新探测到的活源自动并入，之后粘住（抖动不再丢失）；
+  - 直播拉到 0 频道时不覆盖 live.txt。
 """
 import json, subprocess
 
 UA = "Mozilla/5.0"
 LIVE_URL = "https://gitee.com/qx_2026/mybox/raw/master/live.txt"
+PRIOR_URL = "https://gitee.com/qx_2026/mybox/raw/master/mycfg.json"  # 读上一次结果做"粘滞"
 
-# 核心稳定源：无条件保留（TVBox 运行时会跳过个别失效的，不影响其它）
+# 核心稳定源：无条件保留
 CORE = [
     ("lz",  "量子",  "https://cj.lziapi.com/api.php/provide/vod/"),
     ("ff",  "非凡",  "https://ffzy.tv/api.php/provide/vod/"),
@@ -17,7 +23,7 @@ CORE = [
     ("bd",  "百度",  "https://api.apibdzy.com/api.php/provide/vod/"),
     ("360", "360",   "https://360zy.com/api.php/provide/vod/"),
 ]
-# 额外候选：探测到活才追加（探测超时/失败则不加，宁缺毋滥）
+# 额外候选：活则加入并粘住（想扩充源就把新地址加到这里）
 EXTRA = [
     ("ff2", "非凡2", "https://api.ffzzyui.com/api.php/provide/vod/"),
     ("hs",  "华为",  "https://hwapi.vhomcas.com/api.php/provide/vod/"),
@@ -40,18 +46,20 @@ def curl(url, timeout=20):
         return ""
 
 
-def vod_alive(api):
+def probe(api):
+    """返回 'alive' / 'dead' / 'unknown'（超时/无响应=unknown，不下死结论）"""
     sep = "&" if "?" in api else "?"
     txt = curl(api + sep + "ac=detail&wd=%E5%BA%86%E4%BD%99%E5%B9%B4", 20)
     if not txt:
-        return False
+        return "unknown"
     low = txt.lower()
     if "closed" in low or "error code" in low:
-        return False
+        return "dead"
     try:
-        return bool(json.loads(txt).get("list"))
+        j = json.loads(txt)
     except Exception:
-        return False
+        return "unknown"
+    return "alive" if j.get("list") else "dead"
 
 
 def site(key, name, api):
@@ -59,25 +67,51 @@ def site(key, name, api):
             "searchable": 1, "quickSearch": 1, "filterable": 1}
 
 
+def load_prior():
+    """读上一次 Gitee 配置里的 sites，作为粘滞基线"""
+    try:
+        cfg = json.loads(curl(PRIOR_URL, 20))
+    except Exception:
+        return {}
+    out = {}
+    for s in cfg.get("sites", []):
+        if s.get("api"):
+            out[s["api"]] = s
+    return out
+
+
 def parse_m3u(text):
-    out, name = [], None
+    res, name = [], None
     for ln in text.splitlines():
         if ln.startswith("#EXTINF"):
             name = ln.split(",")[-1].strip()
         elif ln.startswith("http") and name:
-            out.append((name, ln.strip())); name = None
-    return out
+            res.append((name, ln.strip())); name = None
+    return res
 
 
 def main():
-    sites = [site(k, n, a) for k, n, a in CORE]        # 核心全保
-    print("[core kept] %d" % len(sites))
-    for key, name, api in EXTRA:                        # 额外活才加
-        if vod_alive(api):
-            sites.append(site(key, name, api))
-            print("[extra alive]", name)
-        else:
-            print("[extra dead ]", name)
+    prior = load_prior()
+    core_apis = set(a for _, _, a in CORE)
+
+    known = {}
+    for k, n, a in CORE:
+        known[a] = site(k, n, a)
+    for k, n, a in EXTRA:
+        known.setdefault(a, site(k, n, a))
+    for a, s in prior.items():
+        known.setdefault(a, s)
+
+    sites = []
+    for a, s in known.items():
+        if a in core_apis:
+            sites.append(s)
+            continue
+        st = probe(a)
+        keep = (st == "alive") or (st == "unknown" and a in prior)
+        if keep:
+            sites.append(s)
+        print("[%s] %-6s %s" % (st, ("keep" if keep else "drop"), s.get("name")))
 
     cfg = {"spider": "", "sites": sites, "parses": [],
            "lives": [{"name": "电视直播", "type": 0, "url": LIVE_URL, "playerType": 1, "epg": ""}],
@@ -93,7 +127,6 @@ def main():
             buckets[b].append((name, u))
     total = len(buckets["央视"]) + len(buckets["卫视"])
     if total == 0:
-        # 拉取失败/为空：绝不覆盖，保留上一次的 live.txt，避免把直播刷空
         print("[live] 拉取到 0 个频道，跳过覆盖 live.txt")
     else:
         lines = []
