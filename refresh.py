@@ -1,22 +1,25 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-refresh.py —— Gitee Go 每天自动重算 TVBox 配置（点播存活源 + 直播频道）
-产物写回仓库根目录：mycfg.json / live.txt，由流水线 commit 回去。
+refresh.py —— 自动重算 TVBox 配置（点播源 + 直播频道），产物写回仓库根：mycfg.json / live.txt
+设计：CORE 核心源永远保留（防境外探测超时误杀）；EXTRA 候选源"活才追加"。
 """
 import json, subprocess
 
 UA = "Mozilla/5.0"
-# 直播清单地址：指向本仓库 Gitee raw 的 live.txt
 LIVE_URL = "https://gitee.com/qx_2026/mybox/raw/master/live.txt"
 
-VOD_CANDIDATES = [
+# 核心稳定源：无条件保留（TVBox 运行时会跳过个别失效的，不影响其它）
+CORE = [
     ("lz",  "量子",  "https://cj.lziapi.com/api.php/provide/vod/"),
     ("ff",  "非凡",  "https://ffzy.tv/api.php/provide/vod/"),
-    ("ff2", "非凡2", "https://api.ffzzyui.com/api.php/provide/vod/"),
     ("js",  "极速",  "https://jszyapi.com/api.php/provide/vod/"),
     ("bd",  "百度",  "https://api.apibdzy.com/api.php/provide/vod/"),
     ("360", "360",   "https://360zy.com/api.php/provide/vod/"),
+]
+# 额外候选：探测到活才追加（探测超时/失败则不加，宁缺毋滥）
+EXTRA = [
+    ("ff2", "非凡2", "https://api.ffzzyui.com/api.php/provide/vod/"),
     ("hs",  "华为",  "https://hwapi.vhomcas.com/api.php/provide/vod/"),
     ("tk",  "淘剧",  "https://taopjuy.com/api.php/provide/vod/"),
     ("bl",  "蓝鸟",  "https://api.lndbzy.com/api.php/provide/vod/"),
@@ -28,7 +31,7 @@ LIVE_M3U = [
 ]
 
 
-def curl(url, timeout=15):
+def curl(url, timeout=20):
     try:
         r = subprocess.run(["curl", "-sSL", "--max-time", str(timeout), "-A", UA, url],
                            capture_output=True, text=True, timeout=timeout + 8)
@@ -39,7 +42,7 @@ def curl(url, timeout=15):
 
 def vod_alive(api):
     sep = "&" if "?" in api else "?"
-    txt = curl(api + sep + "ac=detail&wd=%E5%BA%86%E4%BD%99%E5%B9%B4", 12)
+    txt = curl(api + sep + "ac=detail&wd=%E5%BA%86%E4%BD%99%E5%B9%B4", 20)
     if not txt:
         return False
     low = txt.lower()
@@ -49,6 +52,11 @@ def vod_alive(api):
         return bool(json.loads(txt).get("list"))
     except Exception:
         return False
+
+
+def site(key, name, api):
+    return {"key": key, "name": name, "type": 1, "api": api,
+            "searchable": 1, "quickSearch": 1, "filterable": 1}
 
 
 def parse_m3u(text):
@@ -62,14 +70,14 @@ def parse_m3u(text):
 
 
 def main():
-    sites = []
-    for key, name, api in VOD_CANDIDATES:
+    sites = [site(k, n, a) for k, n, a in CORE]        # 核心全保
+    print("[core kept] %d" % len(sites))
+    for key, name, api in EXTRA:                        # 额外活才加
         if vod_alive(api):
-            sites.append({"key": key, "name": name, "type": 1, "api": api,
-                          "searchable": 1, "quickSearch": 1, "filterable": 1})
-            print("[vod alive]", name)
+            sites.append(site(key, name, api))
+            print("[extra alive]", name)
         else:
-            print("[vod dead ]", name)
+            print("[extra dead ]", name)
 
     cfg = {"spider": "", "sites": sites, "parses": [],
            "lives": [{"name": "电视直播", "type": 0, "url": LIVE_URL, "playerType": 1, "epg": ""}],
@@ -78,16 +86,21 @@ def main():
 
     buckets = {"央视": [], "卫视": []}
     for url in LIVE_M3U:
-        for name, u in parse_m3u(curl(url, 25)):
+        for name, u in parse_m3u(curl(url, 30)):
             b = "央视" if "CCTV" in name.upper() else "卫视"
             if any(n == name for n, _ in buckets[b]):
                 continue
             buckets[b].append((name, u))
-    lines = []
-    for b in ["央视", "卫视"]:
-        lines.append("%s,#genre#" % b)
-        lines += ["%s,%s" % (n, u) for n, u in buckets[b]]
-    open("live.txt", "w", encoding="utf-8").write("\n".join(lines) + "\n")
+    total = len(buckets["央视"]) + len(buckets["卫视"])
+    if total == 0:
+        # 拉取失败/为空：绝不覆盖，保留上一次的 live.txt，避免把直播刷空
+        print("[live] 拉取到 0 个频道，跳过覆盖 live.txt")
+    else:
+        lines = []
+        for b in ["央视", "卫视"]:
+            lines.append("%s,#genre#" % b)
+            lines += ["%s,%s" % (n, u) for n, u in buckets[b]]
+        open("live.txt", "w", encoding="utf-8").write("\n".join(lines) + "\n")
     print("done: vod=%d live_cctv=%d live_sat=%d" % (len(sites), len(buckets["央视"]), len(buckets["卫视"])))
 
 
