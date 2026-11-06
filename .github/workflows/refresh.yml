@@ -18,13 +18,13 @@ jobs:
         run: |
           set -e
           mkdir -p /tmp/out
-          cp mycfg.json live.txt /tmp/out/
+          cp mycfg.json live.txt backup_configs.txt /tmp/out/
           git clone --depth 1 "https://qx_2026:${{ secrets.GITEE_TOKEN }}@gitee.com/qx_2026/mybox.git" gitee_repo
           cd gitee_repo
-          cp /tmp/out/mycfg.json /tmp/out/live.txt .
+          cp /tmp/out/mycfg.json /tmp/out/live.txt /tmp/out/backup_configs.txt .
           git config user.name "gh-actions-bot"
           git config user.email "bot@example.com"
-          git add mycfg.json live.txt
+          git add mycfg.json live.txt backup_configs.txt
           if git diff --cached --quiet; then
             echo "源无变化，跳过提交"
             exit 0
