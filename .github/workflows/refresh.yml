@@ -1,0 +1,24 @@
+name: refresh-to-gitee
+on:
+  schedule:
+    - cron: "15 */6 * * *"
+  workflow_dispatch:
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 重测源，生成 mycfg.json / live.txt
+        run: python3 refresh.py
+      - name: 推送到 Gitee 仓库
+        run: |
+          git config user.name "gh-actions-bot"
+          git config user.email "bot@example.com"
+          git add mycfg.json live.txt
+          if git diff --cached --quiet; then
+            echo "源无变化，跳过"
+            exit 0
+          fi
+          git commit -m "auto: refresh sources $(date -u +%F_%H%M)"
+          git remote add gitee "https://qx_2026:${{ secrets.GITEE_TOKEN }}@gitee.com/qx_2026/mybox.git"
+          git push gitee HEAD:master
